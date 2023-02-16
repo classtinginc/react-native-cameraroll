@@ -138,82 +138,105 @@ public class CameraRollModule extends ReactContextBaseJavaModule {
     @Override
     protected void doInBackgroundGuarded(Void... params) {
       File source = new File(mUri.getPath());
-      FileChannel input = null, output = null;
-      try {
-        boolean isAlbumPresent = !"".equals(mOptions.getString("album"));
-        
-        final File environment;
-        // Media is not saved into an album when using Environment.DIRECTORY_DCIM.
-        if (isAlbumPresent) {
-          if ("video".equals(mOptions.getString("type"))) {
-            environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
-          } else {
-            environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
-          }
-        } else {
-          environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
-        }
+      FileInputStream input = null;
+      OutputStream output = null;
 
-        File exportDir;
-        if (isAlbumPresent) {
-          exportDir = new File(environment, mOptions.getString("album"));
-          if (!exportDir.exists() && !exportDir.mkdirs()) {
-            mPromise.reject(ERROR_UNABLE_TO_LOAD, "Album Directory not created. Did you request WRITE_EXTERNAL_STORAGE?");
+      String mimeType = Utils.getMimeType(mUri.getPath());
+      try {
+        String album = mOptions.getString("album");
+        boolean isAlbumPresent = !TextUtils.isEmpty(album);
+
+        // Android Q and above
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          ContentValues mediaDetails = new ContentValues();
+          if (isAlbumPresent) {
+            String relativePath = Environment.DIRECTORY_DCIM + File.separator + album;
+            mediaDetails.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+          }
+          mediaDetails.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
+          mediaDetails.put(Images.Media.DISPLAY_NAME, source.getName());
+          mediaDetails.put(Images.Media.IS_PENDING, 1);
+          ContentResolver resolver = mContext.getContentResolver();
+          Uri mediaContentUri = resolver
+                  .insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaDetails);
+          output = resolver.openOutputStream(mediaContentUri);
+          input = new FileInputStream(source);
+          FileUtils.copy(input, output);
+          mediaDetails.clear();
+          mediaDetails.put(Images.Media.IS_PENDING, 0);
+          resolver.update(mediaContentUri, mediaDetails, null, null);
+          mPromise.resolve(mediaContentUri.toString());
+        } else {
+          final File environment;
+          // Media is not saved into an album when using Environment.DIRECTORY_DCIM.
+          if (isAlbumPresent) {
+            if ("video".equals(mOptions.getString("type"))) {
+              environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
+            } else {
+              environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
+            }
+          } else {
+            environment = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
+          }
+          File exportDir;
+          if (isAlbumPresent) {
+            exportDir = new File(environment, album);
+            if (!exportDir.exists() && !exportDir.mkdirs()) {
+              mPromise.reject(ERROR_UNABLE_TO_LOAD, "Album Directory not created. Did you request WRITE_EXTERNAL_STORAGE?");
+              return;
+            }
+          } else {
+            exportDir = environment;
+          }
+
+          if (!exportDir.isDirectory()) {
+            mPromise.reject(ERROR_UNABLE_TO_LOAD, "External media storage directory not available");
             return;
           }
-        } else {
-          exportDir = environment;
-        }
+          File dest = new File(exportDir, source.getName());
+          int n = 0;
+          String fullSourceName = source.getName();
+          String sourceName, sourceExt;
+          if (fullSourceName.indexOf('.') >= 0) {
+            sourceName = fullSourceName.substring(0, fullSourceName.lastIndexOf('.'));
+            sourceExt = fullSourceName.substring(fullSourceName.lastIndexOf('.'));
+          } else {
+            sourceName = fullSourceName;
+            sourceExt = "";
+          }
+          while (!dest.createNewFile()) {
+            dest = new File(exportDir, sourceName + "_" + (n++) + sourceExt);
+          }
+          input = new FileInputStream(source);
+          output = new FileOutputStream(dest);
+          ((FileOutputStream) output).getChannel()
+                  .transferFrom(input.getChannel(), 0, input.getChannel().size());
+          input.close();
+          output.close();
 
-        if (!exportDir.isDirectory()) {
-          mPromise.reject(ERROR_UNABLE_TO_LOAD, "External media storage directory not available");
-          return;
+          MediaScannerConnection.scanFile(
+                  mContext,
+                  new String[]{dest.getAbsolutePath()},
+                  null,
+                  (path, uri) -> {
+                    if (uri != null) {
+                      mPromise.resolve(uri.toString());
+                    } else {
+                      mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not add image to gallery");
+                    }
+                  });
         }
-        File dest = new File(exportDir, source.getName());
-        int n = 0;
-        String fullSourceName = source.getName();
-        String sourceName, sourceExt;
-        if (fullSourceName.indexOf('.') >= 0) {
-          sourceName = fullSourceName.substring(0, fullSourceName.lastIndexOf('.'));
-          sourceExt = fullSourceName.substring(fullSourceName.lastIndexOf('.'));
-        } else {
-          sourceName = fullSourceName;
-          sourceExt = "";
-        }
-        while (!dest.createNewFile()) {
-          dest = new File(exportDir, sourceName + "_" + (n++) + sourceExt);
-        }
-        input = new FileInputStream(source).getChannel();
-        output = new FileOutputStream(dest).getChannel();
-        output.transferFrom(input, 0, input.size());
-        input.close();
-        output.close();
-
-        MediaScannerConnection.scanFile(
-            mContext,
-            new String[]{dest.getAbsolutePath()},
-            null,
-            new MediaScannerConnection.OnScanCompletedListener() {
-              @Override
-              public void onScanCompleted(String path, Uri uri) {
-                if (uri != null) {
-                  mPromise.resolve(uri.toString());
-                } else {
-                  mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not add image to gallery");
-                }
-              }
-            });
       } catch (IOException e) {
         mPromise.reject(e);
       } finally {
-        if (input != null && input.isOpen()) {
+        if (input != null) {
           try {
             input.close();
           } catch (IOException e) {
             FLog.e(ReactConstants.TAG, "Could not close input channel", e);
           }
         }
-        if (output != null && output.isOpen()) {
+        if (output != null) {
           try {
             output.close();
           } catch (IOException e) {
@@ -378,19 +401,35 @@ public class CameraRollModule extends ReactContextBaseJavaModule {
       ContentResolver resolver = mContext.getContentResolver();
 
       try {
-        // set LIMIT to first + 1 so that we know how to populate page_info
-        String limit = "limit=" + (mFirst + 1);
-
-        if (!TextUtils.isEmpty(mAfter)) {
-          limit = "limit=" + mAfter + "," + (mFirst + 1);
+        Cursor media;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+          Bundle bundle = new Bundle();
+          bundle.putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection.toString());
+          bundle.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                  selectionArgs.toArray(new String[selectionArgs.size()]));
+          bundle.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
+          bundle.putInt(ContentResolver.QUERY_ARG_LIMIT, mFirst + 1);
+          if (!TextUtils.isEmpty(mAfter)) {
+            bundle.putInt(ContentResolver.QUERY_ARG_OFFSET, Integer.parseInt(mAfter));
+          }
+          media = resolver.query(
+                  MediaStore.Files.getContentUri("external"),
+                  PROJECTION,
+                  bundle,
+                  null);
+        } else {
+          // set LIMIT to first + 1 so that we know how to populate page_info
+          String limit = "limit=" + (mFirst + 1);
+          if (!TextUtils.isEmpty(mAfter)) {
+            limit = "limit=" + mAfter + "," + (mFirst + 1);
+          }
+          media = resolver.query(
+                  MediaStore.Files.getContentUri("external").buildUpon().encodedQuery(limit).build(),
+                  PROJECTION,
+                  selection.toString(),
+                  selectionArgs.toArray(new String[selectionArgs.size()]),
+                  Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
         }
-
-        Cursor media = resolver.query(
-            MediaStore.Files.getContentUri("external").buildUpon().encodedQuery(limit).build(),
-            PROJECTION,
-            selection.toString(),
-            selectionArgs.toArray(new String[selectionArgs.size()]),
-            Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
         if (media == null) {
           mPromise.reject(ERROR_UNABLE_TO_LOAD, "Could not get media");
         } else {
