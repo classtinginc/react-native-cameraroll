@@ -7,6 +7,7 @@
   "main": "./js/CameraRoll.js",
   "types": "./typings/CameraRoll.d.ts",
   "scripts": {
+    "release": "./scripts/release.sh",
     "start": "react-native start",
     "start:android": "react-native run-android --root example/",
     "start:ios": "react-native run-ios --project-path example/ios",
